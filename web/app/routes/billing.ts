@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 
 import db from "@/lib/db";
-import { dodoClient, PREMIUM_PRODUCT_ID } from "@/lib/dodo";
+import { getDodoClient, PREMIUM_PRODUCT_ID } from "@/lib/dodo";
 import { authMiddleware, requireAuth } from "@/lib/hono-auth";
 import type { AuthVariables } from "@/lib/hono-auth";
 
@@ -17,6 +17,8 @@ billing.get(
     if (!user.email || !user.name) {
       return c.json({ error: "Unauthorized" }, 401);
     }
+
+    const dodoClient = getDodoClient();
 
     const session = await dodoClient.checkoutSessions.create({
       product_cart: [{ product_id: PREMIUM_PRODUCT_ID, quantity: 1 }],
@@ -48,11 +50,12 @@ billing.post("/dodo/webhook", async (c) => {
   const body = await c.req.text();
   let payload: any;
   try {
+    const dodoClient = getDodoClient();
     payload = dodoClient.webhooks.unwrap(body, {
       headers: Object.fromEntries(c.req.raw.headers.entries()),
       key: secret,
     });
-  } catch (error) {
+  } catch {
     return c.json(
       { error: "Invalid or unsigned webhook payload" },
       400,
@@ -61,7 +64,7 @@ billing.post("/dodo/webhook", async (c) => {
 
   console.log("Received Dodo webhook:", payload);
 
-  const cart = await payload.data.product_cart;
+  const cart = payload.data.product_cart;
 
   if (cart[0].product_id == PREMIUM_PRODUCT_ID) {
     await db.user.update({

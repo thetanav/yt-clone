@@ -16,9 +16,12 @@ model Video {
   likes       Int     @default(0)
   status      String  @default("pending")
   progress    Int     @default(0)
+  resolutions String[] @default(["240p", "480p", "720p", "1080p"])
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  likesReceived Like[]
 
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
   userId String
@@ -36,6 +39,7 @@ model User {
   accounts           Account[]
   sessions           Session[]
   videos             Video[]
+  likesReceived      Like[]
 
   createdAt DateTime @db.Timestamptz(3)
   updatedAt DateTime @db.Timestamptz(3)
@@ -72,6 +76,18 @@ model Session {
   updatedAt DateTime @db.Timestamptz(3)
 
   @@index([userId])
+}
+
+model Like {
+  userId    String
+  videoId   String
+  createdAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  video Video @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@id([userId, videoId])
+  @@index([videoId])
 }
 
 model Verification {

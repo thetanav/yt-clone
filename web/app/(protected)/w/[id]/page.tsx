@@ -59,7 +59,7 @@ export default async function Page({
         {/* Player */}
         <div className="relative w-full overflow-hidden rounded-lg border border-border bg-muted/10" style={{ aspectRatio: "16/9" }}>
           {video.status === "done" ? (
-            <VideoJsPlayer id={id} />
+            <VideoJsPlayer id={id} resolutions={video.resolutions} />
           ) : (
             <div className="flex h-full flex-col items-center justify-center gap-3">
               <div className="flex h-9 w-9 items-center justify-center rounded-full border border-border bg-muted/40 text-foreground/80">
@@ -107,7 +107,10 @@ export default async function Page({
             </div>
 
             {/* Actions */}
-            <WatchClient videoId={id} initialLikes={video.likes ?? 0} />
+            <WatchClient
+              videoId={id}
+              initialLikes={video.likes ?? 0}
+            />
           </div>
 
           {/* Description */}

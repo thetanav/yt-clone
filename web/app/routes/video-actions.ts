@@ -2,28 +2,99 @@ import { Hono } from "hono";
 
 import db from "@/lib/db";
 import { getPlaybackUrl } from "@/lib/video-urls";
+import { authMiddleware } from "@/lib/hono-auth";
+import type { AuthVariables } from "@/lib/hono-auth";
 
-const videoActions = new Hono();
+const videoActions = new Hono<{ Variables: AuthVariables }>();
+
+videoActions.use("*", authMiddleware);
 
 videoActions.post("/:id/like", async (c) => {
+  const user = c.get("user");
+  if (!user?.id) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
   const id = c.req.param("id");
 
-  const video = await db.video.findUnique({
-    where: { id },
-    select: { id: true },
+  const likes = await db.$transaction(async (tx) => {
+    const existing = await tx.like.findUnique({
+      where: { userId_videoId: { userId: user.id, videoId: id } },
+    });
+
+    if (existing) {
+      return (
+        (await tx.video.findUnique({
+          where: { id },
+          select: { likes: true },
+        }))?.likes ?? 0
+      );
+    }
+
+    const video = await tx.video.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+    if (!video) return null;
+
+    await tx.like.create({ data: { userId: user.id, videoId: id } });
+    const updated = await tx.video.update({
+      where: { id },
+      data: { likes: { increment: 1 } },
+      select: { likes: true },
+    });
+
+    return updated.likes;
   });
 
-  if (!video) {
+  if (likes === null) {
     return c.json({ error: "Not found" }, 404);
   }
 
-  const updated = await db.video.update({
-    where: { id },
-    data: { likes: { increment: 1 } },
-    select: { likes: true },
+  return c.json({ likes });
+});
+
+videoActions.delete("/:id/like", async (c) => {
+  const user = c.get("user");
+  if (!user?.id) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const id = c.req.param("id");
+
+  const likes = await db.$transaction(async (tx) => {
+    const video = await tx.video.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+    if (!video) return null;
+
+    const removed = await tx.like.deleteMany({
+      where: { userId: user.id, videoId: id },
+    });
+
+    if (removed.count > 0) {
+      const updated = await tx.video.update({
+        where: { id },
+        data: { likes: { decrement: 1 } },
+        select: { likes: true },
+      });
+      return updated.likes;
+    }
+
+    return (
+      (await tx.video.findUnique({
+        where: { id },
+        select: { likes: true },
+      }))?.likes ?? 0
+    );
   });
 
-  return c.json({ likes: updated.likes });
+  if (likes === null) {
+    return c.json({ error: "Not found" }, 404);
+  }
+
+  return c.json({ likes });
 });
 
 videoActions.post("/:id/view", async (c) => {

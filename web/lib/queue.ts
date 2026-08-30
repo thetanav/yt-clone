@@ -5,6 +5,7 @@ export const QUEUE = "video-queue";
 export type QueueJob = {
   name: string;
   ext: string;
+  resolutions?: string[];
   attempts?: number;
 };
 

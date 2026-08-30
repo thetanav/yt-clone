@@ -2,15 +2,25 @@ import { spawn, execSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import axios from "axios";
 import { pipeline } from "stream/promises";
-import { UTApi } from "uploadthing/server";
-import { MAX_RETRIES, drainDueRetries, popJob, scheduleRetry } from "./queue.js";
+import {
+  MAX_RETRIES,
+  completeJob,
+  drainDueRetries,
+  popJob,
+  recoverExpiredInflight,
+  scheduleRetry,
+  touchJob,
+} from "./queue.js";
 
 dotenv.config();
-
-const utapi = new UTApi();
 
 export const r2 = new S3Client({
   region: "auto",
@@ -21,7 +31,11 @@ export const r2 = new S3Client({
   },
 });
 
+const RAW_PREFIX = "raw_videos/";
 const tmpDir = "tmp";
+const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024;
+
+class PermanentlyFailedError extends Error {}
 
 interface Resolution {
   name: string;
@@ -35,6 +49,20 @@ const resolutions: Resolution[] = [
   { name: "720p", height: 720, bitrate: "1400k" },
   { name: "1080p", height: 1080, bitrate: "2800k" },
 ];
+
+function getVideoDimensions(inputPath: string): { width: number; height: number } | null {
+  try {
+    const result = execSync(
+      `ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 "${inputPath}"`,
+      { encoding: "utf-8" },
+    ).trim();
+    const [width, height] = result.split("x").map((v) => parseInt(v));
+    if (width && height) return { width, height };
+  } catch {
+    // fall back to placeholder dimensions below
+  }
+  return null;
+}
 
 async function encodeResolution(
   inputPath: string,
@@ -202,47 +230,45 @@ function formatVttTime(seconds: number): string {
   );
 }
 
-function createMasterPlaylist(outputDir: string) {
+function createMasterPlaylist(outputDir: string, targets: Resolution[]) {
   const masterPath = path.join(outputDir, "index.m3u8");
   let content = "#EXTM3U\n#EXT-X-VERSION:3\n";
 
-  resolutions.forEach((res) => {
+  targets.forEach((res) => {
+    const playlistPath = path.join(outputDir, `${res.name}.m3u8`);
+    const dimensions =
+      getVideoDimensions(playlistPath) ?? { width: 1920, height: res.height };
     const bandwidth = parseInt(res.bitrate) * 1000;
-    content += `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=1920x${res.height}\n`;
+    content += `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${dimensions.width}x${dimensions.height}\n`;
     content += `${res.name}.m3u8\n`;
   });
 
   fs.writeFileSync(masterPath, content);
 }
 
-export async function downloadUploadThing(url: string, outPath: string) {
-  console.log("> Downloading video...");
+async function downloadFromR2(key: string, outPath: string): Promise<number> {
+  console.log(`> Downloading raw video from R2 (${key})...`);
 
   const tempPath = `${outPath}.tmp`;
 
   let response;
   try {
-    response = await axios.get(url, {
-      responseType: "stream",
-      timeout: 30_000,
-      maxRedirects: 5,
-      validateStatus: (status) => status >= 200 && status < 300,
-      headers: {
-        "User-Agent": "node-worker",
-        Accept: "*/*",
-      },
-    });
+    response = await r2.send(
+      new GetObjectCommand({ Bucket: process.env.R2_BUCKET ?? "yux-videos", Key: key }),
+    );
   } catch (err: any) {
-    throw new Error(`Download request failed: ${err.message}`);
+    throw new Error(`R2 download request failed: ${err.message}`);
   }
 
-  const contentType = response.headers["content-type"] || "";
-  if (contentType.includes("text/html")) {
-    throw new Error("Download failed: received HTML instead of file");
+  if (!response.Body) {
+    throw new Error("R2 download failed: empty body");
   }
 
   try {
-    await pipeline(response.data, fs.createWriteStream(tempPath));
+    await pipeline(
+      response.Body as NodeJS.ReadableStream,
+      fs.createWriteStream(tempPath),
+    );
   } catch (err: any) {
     if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
     throw new Error(`Stream write failed: ${err.message}`);
@@ -259,7 +285,29 @@ export async function downloadUploadThing(url: string, outPath: string) {
   }
 
   fs.renameSync(tempPath, outPath);
-  console.log(`> Downloaded video ${stats.size} bytes to ${outPath}`);
+  console.log(`> Downloaded raw video ${stats.size} bytes to ${outPath}`);
+  return stats.size;
+}
+
+async function deleteFromR2(key: string, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      await r2.send(
+        new DeleteObjectCommand({
+          Bucket: process.env.R2_BUCKET ?? "yux-videos",
+          Key: key,
+        }),
+      );
+      console.log(`> Deleted raw video from R2 (${key})`);
+      return;
+    } catch (error) {
+      console.error(`Delete attempt ${attempt}/${retries} failed for ${key}:`, error);
+      if (attempt === retries) {
+        throw new Error(`Failed to delete ${key} after ${retries} attempts`);
+      }
+      await new Promise((res) => setTimeout(res, 1000 * attempt));
+    }
+  }
 }
 
 async function uploadToR2(
@@ -273,7 +321,7 @@ async function uploadToR2(
       const fileStream = fs.createReadStream(filePath);
       await r2.send(
         new PutObjectCommand({
-          Bucket: "yux-videos",
+          Bucket: process.env.R2_BUCKET ?? "yux-videos",
           Key: key,
           Body: fileStream,
           ContentType: contentType,
@@ -311,6 +359,7 @@ function cleanup(paths: string[]) {
 interface Job {
   name: string;
   ext: string;
+  resolutions?: string[];
   attempts?: number;
 }
 
@@ -318,23 +367,38 @@ async function reportStatus(
   jobId: string,
   status: JobStatus,
   progress?: number,
-) {
+): Promise<boolean> {
   const nextProgress =
     progress ?? (status === "done" ? 100 : status === "pending" ? 0 : undefined);
 
-  try {
-    const headers = process.env.WORKER_SHARED_SECRET
-      ? { "x-worker-secret": process.env.WORKER_SHARED_SECRET }
-      : undefined;
+  const headers = process.env.WORKER_SHARED_SECRET
+    ? { "x-worker-secret": process.env.WORKER_SHARED_SECRET }
+    : undefined;
 
-    await axios.post(
-      `${process.env.BACKEND_URL}/api/status/${jobId}`,
-      { status, progress: nextProgress },
-      headers ? { headers } : undefined,
-    );
-  } catch (error) {
-    console.error("> Error posting status:", error);
+  // Terminal states are acknowledged back by the web app; retry harder so a
+  // transient outage can't strand a video in "processing" forever.
+  const attempts = status === "done" || status === "failed" ? 10 : 3;
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      await axios.post(
+        `${process.env.BACKEND_URL}/api/status/${jobId}`,
+        { status, progress: nextProgress },
+        headers ? { headers } : undefined,
+      );
+      return true;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+    }
   }
+
+  console.error(
+    `> Failed to report status ${status} for ${jobId} after ${attempts} attempts:`,
+    lastError,
+  );
+  return false;
 }
 
 type JobStatus = "pending" | "processing" | "done" | "failed";
@@ -353,6 +417,11 @@ function parseJob(raw: string): Job | null {
       return {
         name: parsed.name,
         ext: parsed.ext,
+        resolutions:
+          Array.isArray(parsed.resolutions) &&
+          parsed.resolutions.every((r: unknown) => typeof r === "string")
+            ? parsed.resolutions
+            : undefined,
         attempts:
           typeof (parsed as { attempts?: unknown }).attempts === "number" &&
           Number.isFinite((parsed as { attempts?: number }).attempts ?? NaN)
@@ -367,20 +436,36 @@ function parseJob(raw: string): Job | null {
   return null;
 }
 
-async function processJob(job: Job) {
+async function processJob(job: Job, raw: string) {
   const { name, ext } = job;
 
-  const url = `https://odr537djvh.ufs.sh/f/tmp/${name}.${ext}`;
+  const rawKey = `${RAW_PREFIX}${name}.${ext}`;
   const inputPath = path.join(tmpDir, `${name}.${ext}`);
   const outputDir = path.join(tmpDir, name);
   const thumbnailPath = path.join(tmpDir, `${name}_thumb.jpg`);
+
+  const requested = job.resolutions?.length
+    ? job.resolutions.filter((r) => resolutions.some((x) => x.name === r))
+    : resolutions.map((x) => x.name);
+  const targets =
+    resolutions.filter((x) => requested.includes(x.name)).length > 0
+      ? resolutions.filter((x) => requested.includes(x.name))
+      : resolutions;
+
+  console.log(`> Renditions to encode: ${targets.map((t) => t.name).join(", ")}`);
 
   try {
     if (!fs.existsSync(tmpDir)) {
       fs.mkdirSync(tmpDir, { recursive: true });
     }
 
-    await downloadUploadThing(url, inputPath);
+    const downloadedSize = await downloadFromR2(rawKey, inputPath);
+    if (downloadedSize > MAX_FILE_SIZE) {
+      throw new PermanentlyFailedError(
+        `Raw video exceeds the ${Math.round(MAX_FILE_SIZE / 1e9)}GB size limit`,
+      );
+    }
+    await touchJob(raw);
     await reportStatus(name, "processing", 10);
 
     console.log("> Generating thumbnail...");
@@ -393,19 +478,15 @@ async function processJob(job: Job) {
 
     fs.mkdirSync(outputDir, { recursive: true });
 
-    for (const resolution of resolutions) {
+    const stride = Math.round(60 / targets.length);
+    for (let i = 0; i < targets.length; i++) {
+      const resolution = targets[i]!;
       console.log(`> Encoding ${resolution.name}...`);
       await encodeResolution(inputPath, outputDir, resolution);
-      const nextProgress = Math.min(
-        75,
-        15 +
-          resolutions.findIndex((item) => item.name === resolution.name) * 15 +
-          15,
-      );
-      await reportStatus(name, "processing", nextProgress);
+      await reportStatus(name, "processing", Math.min(75, 15 + (i + 1) * stride));
     }
 
-    createMasterPlaylist(outputDir);
+    createMasterPlaylist(outputDir, targets);
     await reportStatus(name, "processing", 78);
 
     console.log("> Generating thumbnail sprites...");
@@ -413,13 +494,16 @@ async function processJob(job: Job) {
       inputPath,
       outputDir,
     );
+    await touchJob(raw);
     await reportStatus(name, "processing", 85);
 
     fs.unlinkSync(inputPath);
 
     console.log("> Uploading to R2...");
     try {
-      const files = fs.readdirSync(outputDir).filter((f) => !f.startsWith("sprites"));
+      const files = fs
+        .readdirSync(outputDir)
+        .filter((f) => !f.startsWith("sprites"));
       for (const file of files) {
         const filePath = path.join(outputDir, file);
         const contentType = file.endsWith(".m3u8")
@@ -437,10 +521,17 @@ async function processJob(job: Job) {
       }
 
       await uploadToR2(thumbnailPath, `${name}/thumb.jpg`, "image/jpeg");
+
       fs.unlinkSync(thumbnailPath);
       fs.rmSync(outputDir, { recursive: true });
-      await reportStatus(name, "done", 100);
-      await utapi.deleteFiles(`tmp/${name}.${ext}`);
+
+      const doneReported = await reportStatus(name, "done", 100);
+      if (!doneReported) {
+        throw new Error(
+          "Completion could not be confirmed with the web app; keeping raw for retry",
+        );
+      }
+      await deleteFromR2(rawKey);
     } catch (error) {
       console.error(`Error uploading to R2:`, error);
       throw error;
@@ -458,6 +549,7 @@ async function startWorker() {
 
   while (true) {
     await drainDueRetries();
+    await recoverExpiredInflight();
 
     const raw = await popJob();
     if (!raw) {
@@ -467,15 +559,28 @@ async function startWorker() {
 
     const job = parseJob(raw);
     if (!job) {
+      console.error("> Skipping unparseable job:", raw);
+      await completeJob(raw);
       continue;
     }
 
     console.log("Received:", job.name);
 
     try {
-      await processJob(job);
+      await processJob(job, raw);
+      await completeJob(raw);
       console.log("Job processed:", job.name);
     } catch (err) {
+      await completeJob(raw);
+
+      if (err instanceof PermanentlyFailedError) {
+        console.error(
+          `Job ${job.name} permanently failed: ${err.message}`,
+        );
+        await reportStatus(job.name, "failed");
+        continue;
+      }
+
       const attempts = job.attempts ?? 0;
       console.error(
         `Job ${job.name} failed (attempt ${attempts + 1}/${MAX_RETRIES}):`,

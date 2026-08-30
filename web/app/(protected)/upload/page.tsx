@@ -28,6 +28,8 @@ interface QuotaResponse {
   cycleStart: string;
 }
 
+const RESOLUTIONS = ["240p", "480p", "720p", "1080p"] as const;
+
 export default function Page() {
   const router = useRouter();
   const [file, setFile] = useState<UploadedFile | null>(null);
@@ -36,6 +38,7 @@ export default function Page() {
     null,
   );
   const [description, setDescription] = useState("");
+  const [resolutions, setResolutions] = useState<string[]>([...RESOLUTIONS]);
   const [id] = useState(() => nanoid(16));
 
   const quotaQuery = useQuery<QuotaResponse>({
@@ -83,6 +86,7 @@ export default function Page() {
           id,
           extension,
           s3Key: file?.key,
+          resolutions,
         }),
       });
 
@@ -99,11 +103,6 @@ export default function Page() {
       return { success: true };
     },
   });
-
-  const removeFile = () => {
-    setFile(null);
-    setExtension(null);
-  };
 
   return (
     <main>
@@ -193,6 +192,45 @@ export default function Page() {
             />
           </div>
 
+          <div className="space-y-2">
+            <Label className="text-xs font-semibold tracking-tight text-foreground">
+              Renditions
+            </Label>
+            <div className="flex flex-wrap gap-2">
+              {RESOLUTIONS.map((res) => {
+                const checked = resolutions.includes(res);
+                return (
+                  <button
+                    key={res}
+                    type="button"
+                    role="checkbox"
+                    aria-checked={checked}
+                    onClick={() =>
+                      setResolutions((prev) =>
+                        checked
+                          ? prev.filter((r) => r !== res)
+                          : [...prev, res].sort(
+                              (a, b) =>
+                                parseInt(a) - parseInt(b),
+                            ),
+                      )
+                    }
+                    className={`h-9 rounded-md border px-3 text-xs font-medium transition-colors ${
+                      checked
+                        ? "border-foreground bg-foreground text-background"
+                        : "border-border bg-muted/20 text-muted-foreground hover:border-foreground/30"
+                    }`}>
+                    {res}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Choose the output qualities for this video. Fewer renditions
+              transcode faster.
+            </p>
+          </div>
+
           <div className="space-y-1">
             <Label className="text-xs font-semibold tracking-tight text-foreground">
               Video File <span className="text-destructive">*</span>
@@ -254,6 +292,7 @@ export default function Page() {
               disabled={
                 !file ||
                 !title.trim() ||
+                resolutions.length === 0 ||
                 isPending ||
                 isSuccess ||
                 !canUpload ||

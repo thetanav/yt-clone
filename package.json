@@ -1,0 +1,19 @@
+{
+  "name": "vidora",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -n web,worker -c blue,green \"npm --prefix web run dev\" \"npm --prefix worker run dev\"",
+    "dev:web": "npm --prefix web run dev",
+    "dev:worker": "npm --prefix worker run dev",
+    "build": "npm --prefix web run build && npm --prefix worker run build",
+    "build:web": "npm --prefix web run build",
+    "build:worker": "npm --prefix worker run build",
+    "lint": "npm --prefix web run lint",
+    "lint:web": "npm --prefix web run lint",
+    "typecheck:worker": "npm --prefix worker run typecheck"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

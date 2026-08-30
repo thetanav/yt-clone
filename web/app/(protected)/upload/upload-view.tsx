@@ -5,6 +5,7 @@ import { CheckCircle2, Loader2, Upload, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { MAX_FILE_SIZE } from "@/lib/limits";
 
 const VIDEO_EXTENSIONS = ["mp4", "mov", "avi", "mkv", "webm"] as const;
 type VideoExtension = (typeof VIDEO_EXTENSIONS)[number];
@@ -101,6 +102,11 @@ export const UploadView = ({
       return;
     }
 
+    if (pickedFile.size > MAX_FILE_SIZE) {
+      toast.error("File exceeds the 2GB upload limit.");
+      return;
+    }
+
     fetchAbortRef.current?.abort();
     const controller = new AbortController();
     fetchAbortRef.current = controller;
@@ -110,7 +116,7 @@ export const UploadView = ({
 
     try {
       const presignResponse = await fetch(
-        `/api/upload/p/${id}?extension=${encodeURIComponent(extension)}`,
+        `/api/upload/p/${id}?extension=${encodeURIComponent(extension)}&size=${pickedFile.size}`,
         {
           method: "GET",
           credentials: "include",

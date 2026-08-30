@@ -2,7 +2,7 @@
 
 import type { SyntheticEvent } from "react";
 import { useRouter } from "next/navigation";
-import { Eye, MoreVertical } from "lucide-react";
+import { MoreVertical } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,

@@ -4,6 +4,7 @@ import { zValidator } from "@hono/zod-validator";
 
 import db from "@/lib/db";
 import { redis } from "@/lib/redis";
+import { deleteRawVideo, deleteVideoAssets } from "@/lib/r2";
 import { authMiddleware, requireAuth } from "@/lib/hono-auth";
 import type { AuthVariables } from "@/lib/hono-auth";
 
@@ -86,6 +87,8 @@ videos.delete("/:id", async (c) => {
 
   await db.video.delete({ where: { id } });
   await redis.del(`status:${id}`);
+  await deleteVideoAssets(id);
+  await deleteRawVideo(video.s3Key);
 
   return c.json({ ok: true });
 });

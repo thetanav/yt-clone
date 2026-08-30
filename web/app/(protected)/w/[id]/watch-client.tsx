@@ -28,7 +28,7 @@ export default function WatchClient({
 
   const [likes, setLikes] = useState(initialLikes);
   const [liked, setLiked] = useState(false);
-  const [liking, setLiking] = useState(false);
+  const [_liking, setLiking] = useState(false);
 
   // Restore liked state from sessionStorage on mount
   useEffect(() => {

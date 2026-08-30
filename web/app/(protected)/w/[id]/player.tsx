@@ -35,23 +35,39 @@ type PlaybackState = {
   paused: boolean;
 };
 
-function getQualityUrl(src: string, quality: Quality) {
-  const option = qualityOptions.find((item) => item.value === quality);
+function getQualityUrl(
+  src: string,
+  quality: Quality,
+  options: readonly (typeof qualityOptions)[number][],
+) {
+  const option = options.find((item) => item.value === quality);
   if (!option) return src;
 
   return src.replace(/[^/]+$/, option.fileName);
 }
 
-export const VideoJsPlayer = ({ id }: { id: string }) => {
+export const VideoJsPlayer = ({
+  id,
+  resolutions,
+}: {
+  id: string;
+  resolutions: string[];
+}) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const pendingPlaybackState = useRef<PlaybackState | null>(null);
   const src = getPlaybackUrl(id);
+
+  const availableOptions = useMemo(
+    () => qualityOptions.filter((o) => o.value === "auto" || resolutions.includes(o.value)),
+    [resolutions],
+  );
+
   const [selectedQuality, setSelectedQuality] = useState<Quality>("auto");
   const [previewTime, setPreviewTime] = useState(0);
 
   const playbackSrc = useMemo(
-    () => (src ? getQualityUrl(src, selectedQuality) : ""),
-    [selectedQuality, src],
+    () => (src ? getQualityUrl(src, selectedQuality, availableOptions) : ""),
+    [selectedQuality, src, availableOptions],
   );
 
   const vttUrl = useMemo(() => getThumbnailVttUrl(id), [id]);
@@ -152,7 +168,7 @@ export const VideoJsPlayer = ({ id }: { id: string }) => {
               <DropdownMenuRadioGroup
                 value={selectedQuality}
                 onValueChange={handleQualityChange}>
-                {qualityOptions.map((option) => (
+                {availableOptions.map((option) => (
                   <DropdownMenuRadioItem
                     key={option.value}
                     value={option.value}>

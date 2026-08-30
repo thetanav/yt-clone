@@ -12,7 +12,6 @@ import statusRoutes from "@/app/routes/status";
 import quotaRoutes from "@/app/routes/quota";
 import billingRoutes from "@/app/routes/billing";
 import deleteRoutes from "@/app/routes/delete";
-import uploadthingRoutes from "@/app/routes/uploadthing";
 
 const app = new Hono().basePath("/api");
 
@@ -39,7 +38,6 @@ app.route("/status", statusRoutes);
 app.route("/quota", quotaRoutes);
 app.route("/billing", billingRoutes);
 app.route("/delete", deleteRoutes);
-app.route("/uploadthing", uploadthingRoutes);
 
 export const GET = handle(app);
 export const POST = handle(app);
